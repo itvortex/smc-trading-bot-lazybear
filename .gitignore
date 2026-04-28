@@ -1,0 +1,7 @@
+.env
+venv/
+__pycache__/
+Bots_zips
+bot_activity.log
+trade_history.csv
+*.pyc

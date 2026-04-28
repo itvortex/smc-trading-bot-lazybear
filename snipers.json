@@ -1,0 +1,48 @@
+{
+    "active": [],
+    "list": {
+        "0": {
+            "name": "ETH Safe 10x",
+            "symbol": "ETH/USDT:USDT",
+            "position": 200.0,
+            "leverage": 11,
+            "rr": 2.5
+        },
+        "1": {
+            "name": "BTC Aggressive",
+            "symbol": "BTC/USDT:USDT",
+            "position": 80.0,
+            "leverage": 10,
+            "rr": 2.0,
+            "timeframe": "1m",
+            "strat_type": "single"
+        },
+        "1776004689": {
+            "name": "SOL Sniper",
+            "symbol": "SOL/USDT:USDT",
+            "position": 95.0,
+            "leverage": 10,
+            "rr": 1.25,
+            "timeframe": "1m",
+            "strat_type": "single"
+        },
+        "1776170131": {
+            "name": "XRP Sniper",
+            "symbol": "XRP/USDT:USDT",
+            "position": 100.0,
+            "leverage": 15,
+            "rr": 2.0,
+            "timeframe": "1m",
+            "strat_type": "single"
+        },
+        "1776524206": {
+            "name": "DOGE Sniper",
+            "symbol": "DOGE/USDT:USDT",
+            "position": 100.0,
+            "leverage": 15,
+            "rr": 2.5,
+            "timeframe": "1m",
+            "strat_type": "single"
+        }
+    }
+}
