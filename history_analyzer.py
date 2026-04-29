@@ -1,9 +1,5 @@
 import pandas as pd
 import os
-from datetime import datetime
-
-import os
-import pandas as pd
 from datetime import datetime, timedelta
 
 
@@ -19,7 +15,6 @@ class HistoryAnalyzer:
         """Завантажує та готує дані з CSV файлу з урахуванням фільтру часу"""
         if not os.path.exists(self.file_path):
             print(f"❌ Файл {self.file_path} не знайдено!")
-            # Повертаємо порожній DataFrame замість None, щоб уникнути помилок типу 'NoneType has no attribute empty'
             return pd.DataFrame()
 
         try:
@@ -31,11 +26,10 @@ class HistoryAnalyzer:
             if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date'])
 
-                # === НОВИЙ БЛОК: ФІЛЬТРАЦІЯ ПО ЧАСУ ===
+                # === ФІЛЬТРАЦІЯ ПО ЧАСУ ===
                 if self.days is not None:
                     cutoff_date = datetime.now() - timedelta(days=self.days)
                     df = df[df['Date'] >= cutoff_date]
-                # ======================================
 
             # 2. Очищаємо ROE_Percent від знаку '%' та перетворюємо у числа
             if 'ROE_Percent' in df.columns:
@@ -100,41 +94,54 @@ class HistoryAnalyzer:
 
     def get_overall_stats(self):
         """1. Загальна статистика за весь час"""
-        df = self.load_data()
-        return self._calculate_metrics(df)
+        return self._calculate_metrics(self.df)
 
     def analyze_by_symbol(self, symbol):
         """2. Статистика по конкретному активу (напр. BTC/USDT)"""
-        df = self.load_data()
-        if df is not None and 'Symbol' in df.columns:
+        df = self.df
+        if df is not None and not df.empty and 'Symbol' in df.columns:
             df = df[df['Symbol'].str.contains(symbol, case=False, na=False)]
         return self._calculate_metrics(df)
 
     def analyze_by_action(self, action):
         """3. Статистика по напрямку (LONG або SHORT)"""
-        df = self.load_data()
-        if df is not None and 'Action' in df.columns:
+        df = self.df
+        if df is not None and not df.empty and 'Action' in df.columns:
             df = df[df['Action'].str.upper() == action.upper()]
         return self._calculate_metrics(df)
 
     def get_grouped_report(self, group_by_column='Symbol'):
-        """4. Зведений звіт (Можна групувати по монетах або напрямку)"""
-        df = self.load_data()
-        if df is None or group_by_column not in df.columns:
+        """4. Зведений звіт із підрахунком WinRate для кожної групи"""
+        df = self.df
+        if df is None or df.empty or group_by_column not in df.columns:
             return None
 
-        report = df.groupby(group_by_column).agg(
-            Угоди=('PnL_USD', 'count'),
-            PnL=('PnL_USD', 'sum'),
-            Сер_PnL=('PnL_USD', 'mean'),
-            Сер_Маржа=('Margin_USD', 'mean'),
-            Сер_ROE=('ROE_Percent', 'mean')
-        ).reset_index()
+        # Словник агрегації
+        agg_dict = {
+            'PnL_USD': ['count', 'sum', 'mean'],
+            'Margin_USD': 'mean',
+            'ROE_Percent': 'mean'
+        }
 
+        # Якщо є колонка Status, додаємо розрахунок WinRate
+        if 'Status' in df.columns:
+            agg_dict['Status'] = lambda x: (x == 'Success').sum() / len(x) * 100
+
+        report = df.groupby(group_by_column).agg(agg_dict).reset_index()
+
+        # Перейменовуємо колонки для красивого виводу
+        if 'Status' in df.columns:
+            report.columns = [group_by_column, 'Угоди', 'PnL', 'Сер_PnL', 'Сер_Маржа', 'Сер_ROE', 'Вінрейт_%']
+            report['Вінрейт_%'] = report['Вінрейт_%'].round(1)
+        else:
+            report.columns = [group_by_column, 'Угоди', 'PnL', 'Сер_PnL', 'Сер_Маржа', 'Сер_ROE']
+
+        # Округлення
         report['PnL'] = report['PnL'].round(2)
         report['Сер_PnL'] = report['Сер_PnL'].round(2)
         report['Сер_Маржа'] = report['Сер_Маржа'].round(2)
         report['Сер_ROE'] = report['Сер_ROE'].round(2)
+
         return report
 
 

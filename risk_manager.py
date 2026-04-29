@@ -19,12 +19,8 @@ class RiskManager:
         "ETH/USDT:USDT": 0.1,
         "SOL/USDT:USDT": 1.0,
         "XRP/USDT:USDT": 100,
-        "BNB/USDT:USDT": 0.1,
-        "DOGE/USDT:USDT": 10.0,
-        "ADA/USDT:USDT": 10.0,
-        "AVAX/USDT:USDT": 0.1,
-        "DOT/USDT:USDT": 1.0,
-        "LINK/USDT:USDT": 1.0,
+        "DOGE/USDT:USDT": 1000,
+        "LINK/USDT:USDT": 10,
     }
 
     PRICE_PRECISION = {

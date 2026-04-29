@@ -2,11 +2,13 @@
     "active": [],
     "list": {
         "0": {
-            "name": "ETH Safe 10x",
+            "name": "ETH Sniper",
             "symbol": "ETH/USDT:USDT",
-            "position": 200.0,
+            "position": 100.0,
             "leverage": 11,
-            "rr": 2.5
+            "rr": 2.5,
+            "timeframe": "1m",
+            "strat_type": "single"
         },
         "1": {
             "name": "BTC Aggressive",

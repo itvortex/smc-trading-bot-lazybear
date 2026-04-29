@@ -82,7 +82,7 @@ class OKXClient:
         try:
             params = {
                 'instType': 'SWAP',
-                'limit': limit,
+                'limit': str(limit),
             }
 
             response = self.exchange.privateGetAccountPositionsHistory(params)
@@ -110,11 +110,6 @@ class OKXClient:
             for item in data:
                 raw_pos_id = item.get('posId', '')
 
-                # ФІК #4: якщо posId вже бачили — пропускаємо дублікат
-                if raw_pos_id and raw_pos_id in seen_pos_ids:
-                    logger.debug(f"⏭️ Пропускаємо дублікат posId={raw_pos_id}")
-                    continue
-
                 ts_str = item.get('uTime') or item.get('cTime', '0')
                 ts = safe_float(ts_str)
                 date_str = datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d %H:%M')
@@ -136,10 +131,7 @@ class OKXClient:
 
                 # ФІК #4: PosId = тільки raw_pos_id якщо він є
                 # Якщо posId порожній (рідкісний кейс) — fallback на timestamp
-                unique_pos_id = raw_pos_id if raw_pos_id else str(int(ts))
-
-                if raw_pos_id:
-                    seen_pos_ids.add(raw_pos_id)
+                unique_pos_id = f"{raw_pos_id}_{int(ts)}" if raw_pos_id else str(int(ts))
 
                 history.append({
                     'PosId': unique_pos_id,
