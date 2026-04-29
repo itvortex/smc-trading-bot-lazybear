@@ -335,7 +335,8 @@ def download_file_callback(call):
     file_map = {
         'download_log': 'bot_activity.log',
         'download_csv': 'trade_history.csv',
-        'download_json': 'snipers.json'
+        'download_json': 'snipers.json',
+        'download_ml': 'ml_training_data.csv'
     }
 
     file_name = file_map.get(call.data)

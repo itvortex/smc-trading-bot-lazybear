@@ -7,7 +7,6 @@ import bot_state
 from risk_manager import RiskManager
 from strategies.smc_exponential import SMCExponentialStrategy
 from strategies.smc_single import SMCSingleStrategy
-from strategies.smc_bos_strategy import SMCBOSStrategy
 
 logger = logging.getLogger("Bot-Core")
 

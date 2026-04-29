@@ -4,11 +4,11 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional, Dict, Any
-
+from ml_logger import MLDataLogger
 from notifier import notifier
 
 logger = logging.getLogger(__name__)
-
+ml_logger = MLDataLogger()
 
 # ──────────────────────────────────────────────
 # Таблиця параметрів для кожної монети
@@ -320,20 +320,33 @@ class BaseStrategy(ABC):
 
     def _write_csv(self, action: str, entry: float, roe_pct: float, pnl_usd: float,
                    margin: float, status_csv: str):
-        """Записує результат угоди у trade_history.csv."""
+        """Записує результат угоди у trade_history.csv та відправляє дані для ML."""
         file_path = 'trade_history.csv'
         file_exists = os.path.isfile(file_path)
         try:
             with open(file_path, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
+
+                # ФІКС 1: Додали 'PosId' на перше місце в заголовок
                 if not file_exists:
                     writer.writerow(
-                        ['Date', 'Symbol', 'Action', 'Leverage', 'Margin_USD', 'ROE_Percent', 'PnL_USD', 'Status'])
+                        ['PosId', 'Date', 'Symbol', 'Action', 'Leverage', 'Margin_USD', 'ROE_Percent', 'PnL_USD',
+                         'Status'])
+
                 now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                # ФІКС 2: Додали порожні лапки "" на початок, щоб вирівняти колонки!
                 writer.writerow([
-                    now, self.symbol, action, f"{self.leverage}x",
+                    "", now, self.symbol, action, f"{self.leverage}x",
                     round(margin, 2), f"{round(roe_pct, 2)}%",
                     round(pnl_usd, 2), status_csv
                 ])
+
+            # ФІКС 3: Зберігаємо результат в ML-базу
+            # Якщо прибуток більший за 0 — це успіх (1), якщо ні — збиток (0)
+            is_win = pnl_usd > 0
+            # Використовуємо символ монети як ідентифікатор угоди
+            ml_logger.log_result(self.symbol, is_win)
+
         except Exception as e:
             logger.error(f"Помилка запису CSV [{self.symbol}]: {e}")
