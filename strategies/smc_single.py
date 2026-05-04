@@ -381,6 +381,7 @@ class SMCSingleStrategy(BaseStrategy):
             order_id=self.symbol,
             symbol=self.symbol,
             side=signal['action'],
+            base_tf=self.timeframe,
             indicators=signal.get('indicators', {})
         )
         # =========================================================
