@@ -65,15 +65,18 @@ def callback_run_sniper(call):
         # Якщо снайпер старий і не має contract_size — отримуємо з біржі і зберігаємо
         if contract_size is None:
             logger.info(f"[Runner] contract_size відсутній для {cfg['symbol']}, запитую з біржі...")
-            contract_size = bot_state.client.fetch_contract_size(cfg["symbol"])
+            info = bot_state.client.fetch_symbol_info(cfg["symbol"])
+            contract_size = info['contract_size']
             bot_state.snipers_data["list"][sniper_id]["contract_size"] = contract_size
+            bot_state.snipers_data["list"][sniper_id]["precision"] = info['precision']
             bot_state.save_snipers(bot_state.snipers_data)
-            logger.info(f"[Runner] Збережено contract_size={contract_size} для {cfg['symbol']}")
+            logger.info(f"[Runner] Збережено contract_size={contract_size}, precision={info['precision']} для {cfg['symbol']}")
 
         risk_mgr = RiskManager(
             fixed_capital_usd=total_purchasing_power,
             contract_size=contract_size,
-            symbol=cfg["symbol"]
+            symbol=cfg["symbol"],
+            price_precision=cfg.get("precision"),
         )
         bot_state.risk_managers[sniper_id] = risk_mgr
 
@@ -198,19 +201,21 @@ def process_bld_symbol(message, prompt_id):
     wait_msg = notifier.bot.send_message(chat_id, f"🔍 Перевіряю <code>{symbol}</code> на біржі...", parse_mode="HTML")
 
     try:
-        # Запитуємо реальний розмір контракту з біржі
-        contract_size = bot_state.client.fetch_contract_size(symbol)
+        # Запитуємо реальні параметри символу з біржі (contract_size + precision)
+        info = bot_state.client.fetch_symbol_info(symbol)
+        contract_size = info['contract_size']
+        precision = info['precision']
 
-        # Перевіряємо що символ взагалі існує (якщо повернуло 1.0 через помилку — попереджаємо)
         bot_state.user_builder[chat_id]['symbol'] = symbol
         bot_state.user_builder[chat_id]['contract_size'] = contract_size
+        bot_state.user_builder[chat_id]['precision'] = precision
 
         try:
             notifier.bot.delete_message(chat_id, wait_msg.message_id)
         except:
             pass
 
-        logger.info(f"[Builder] Символ {symbol} підтверджено, contract_size={contract_size}")
+        logger.info(f"[Builder] Символ {symbol} підтверджено, contract_size={contract_size}, precision={precision}")
 
     except Exception as e:
         try:
@@ -223,7 +228,7 @@ def process_bld_symbol(message, prompt_id):
     update_builder_menu(chat_id)
 
 
-
+def process_bld_input(message, prompt_id, key, cast_func):
     chat_id = message.chat.id
     if chat_id in bot_state.user_builder:
         try: bot_state.user_builder[chat_id][key] = cast_func(message.text)
@@ -270,7 +275,8 @@ def bld_save(call):
         "rr": data['rr'],
         "timeframe": data.get('timeframe', '1m'),
         "strat_type": data.get('strat_type', 'exponential'),
-        "contract_size": data.get('contract_size'),  # реальне значення з біржі
+        "contract_size": data.get('contract_size'),
+        "precision": data.get('precision'),
     }
 
     if data['mode'] == 'create':

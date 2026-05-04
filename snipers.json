@@ -9,7 +9,8 @@
             "rr": 2.5,
             "timeframe": "1m",
             "strat_type": "single",
-            "contract_size": 0.1
+            "contract_size": 0.1,
+            "precision": 2
         },
         "1": {
             "name": "BTC Aggressive",
@@ -19,7 +20,8 @@
             "rr": 2.0,
             "timeframe": "1m",
             "strat_type": "single",
-            "contract_size": 0.01
+            "contract_size": 0.01,
+            "precision": 1
         },
         "1776004689": {
             "name": "SOL Sniper",
@@ -29,7 +31,8 @@
             "rr": 1.25,
             "timeframe": "1m",
             "strat_type": "single",
-            "contract_size": 1.0
+            "contract_size": 1.0,
+            "precision": 3
         },
         "1776170131": {
             "name": "XRP Sniper",
@@ -39,7 +42,8 @@
             "rr": 2.0,
             "timeframe": "1m",
             "strat_type": "single",
-            "contract_size": 100.0
+            "contract_size": 100.0,
+            "precision": 4
         },
         "1776524206": {
             "name": "DOGE Sniper",
@@ -49,7 +53,19 @@
             "rr": 2.5,
             "timeframe": "1m",
             "strat_type": "single",
-            "contract_size": 10.0
+            "contract_size": 10.0,
+            "precision": 5
+        },
+        "1777895034": {
+            "name": "LINK Sniper",
+            "symbol": "LINK/USDT:USDT",
+            "position": 100.0,
+            "leverage": 10,
+            "rr": 2.5,
+            "timeframe": "1m",
+            "strat_type": "single",
+            "contract_size": 1.0,
+            "precision": 3
         }
     }
 }

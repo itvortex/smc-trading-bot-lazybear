@@ -57,25 +57,53 @@ class OKXClient:
             logger.error(f"Помилка створення ордера: {e}")
             raise e
 
-    def fetch_contract_size(self, symbol: str) -> float:
+    def fetch_symbol_info(self, symbol: str) -> dict:
         """
-        Запитує реальний розмір контракту з біржі для будь-якого символу.
-        Наприклад: BTC/USDT:USDT -> 0.01, DOGE/USDT:USDT -> 10.0
+        Повертає реальні параметри символу з біржі одним запитом:
+          - contract_size : розмір одного контракту (напр. 0.01 для BTC)
+          - precision     : кількість знаків після коми для ціни (напр. 1 для BTC)
 
-        Повертає розмір контракту або 1.0 якщо не вдалося отримати.
+        Результати кешуються в пам'яті — біржа не викликається повторно
+        для вже відомих символів протягом сесії.
+
+        Повертає dict або raises Exception якщо символ не знайдено.
         """
-        try:
-            markets = self.exchange.load_markets()
-            market = markets.get(symbol)
-            if market and market.get('contractSize') is not None:
-                size = float(market['contractSize'])
-                logger.info(f"📦 Розмір контракту {symbol}: {size}")
-                return size
-            logger.warning(f"⚠️ Не вдалося знайти contractSize для {symbol}, використовую 1.0")
-            return 1.0
-        except Exception as e:
-            logger.error(f"Помилка отримання розміру контракту для {symbol}: {e}")
-            return 1.0
+        # Ледачий кеш — ініціалізується при першому виклику
+        if not hasattr(self, '_symbol_cache'):
+            self._symbol_cache = {}
+
+        if symbol in self._symbol_cache:
+            return self._symbol_cache[symbol]
+
+        markets = self.exchange.load_markets()
+        market = markets.get(symbol)
+
+        if not market:
+            raise ValueError(f"Символ '{symbol}' не знайдено на біржі")
+
+        # contract_size — скільки базової валюти в 1 контракті
+        contract_size = float(market.get('contractSize') or 1.0)
+
+        # precision — кількість знаків після коми для ціни ордера
+        # ccxt зберігає як кількість знаків (int) або як tick (0.01 = 2 знаки)
+        price_precision_raw = market.get('precision', {}).get('price', 0.001)
+        if price_precision_raw >= 1:
+            # вже кількість знаків
+            precision = int(price_precision_raw)
+        else:
+            # tick size → кількість знаків
+            import math
+            precision = max(0, -int(math.floor(math.log10(price_precision_raw))))
+
+        info = {'contract_size': contract_size, 'precision': precision}
+        self._symbol_cache[symbol] = info
+
+        logger.info(f"📦 {symbol}: contract_size={contract_size}, price_precision={precision}")
+        return info
+
+    # Зворотня сумісність — старі виклики fetch_contract_size продовжують працювати
+    def fetch_contract_size(self, symbol: str) -> float:
+        return self.fetch_symbol_info(symbol)['contract_size']
 
     def fetch_active_positions(self):
         try:
