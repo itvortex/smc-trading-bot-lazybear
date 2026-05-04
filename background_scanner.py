@@ -35,7 +35,8 @@ def market_scanner_thread():
         cycle_start = time.time()
 
         if bot_state.GLOBAL_RUNNING and bot_state.active_strategies:
-            strategies_snapshot = list(bot_state.active_strategies.items())
+            with bot_state.strategies_lock:
+                strategies_snapshot = list(bot_state.active_strategies.items())
             logger.info(f"Scanning market — активних стратегій: {len(strategies_snapshot)}")
 
             threads = []

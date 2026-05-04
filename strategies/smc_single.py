@@ -11,17 +11,16 @@ import pandas as pd
 import numpy as np
 from telebot import types
 
-from .base_strategy import BaseStrategy
+from .base_strategy import BaseStrategy, ml_logger
 from risk_manager import RiskManager
 from notifier import notifier, TRADE_DETAILS_CACHE
 
 # --- ІМПОРТ НАШОГО ML ЛОГЕРА ---
 from ml_logger import MLDataLogger
 
-logger = logging.getLogger(__name__)
+# ml_logger береться з base_strategy (спільний екземпляр через base_strategy.ml_logger)
 
-# Ініціалізуємо логер для збору бази знань
-ml_logger = MLDataLogger()
+logger = logging.getLogger(__name__)
 
 FRACTAL_BARS = 2
 

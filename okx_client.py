@@ -57,6 +57,26 @@ class OKXClient:
             logger.error(f"Помилка створення ордера: {e}")
             raise e
 
+    def fetch_contract_size(self, symbol: str) -> float:
+        """
+        Запитує реальний розмір контракту з біржі для будь-якого символу.
+        Наприклад: BTC/USDT:USDT -> 0.01, DOGE/USDT:USDT -> 10.0
+
+        Повертає розмір контракту або 1.0 якщо не вдалося отримати.
+        """
+        try:
+            markets = self.exchange.load_markets()
+            market = markets.get(symbol)
+            if market and market.get('contractSize') is not None:
+                size = float(market['contractSize'])
+                logger.info(f"📦 Розмір контракту {symbol}: {size}")
+                return size
+            logger.warning(f"⚠️ Не вдалося знайти contractSize для {symbol}, використовую 1.0")
+            return 1.0
+        except Exception as e:
+            logger.error(f"Помилка отримання розміру контракту для {symbol}: {e}")
+            return 1.0
+
     def fetch_active_positions(self):
         try:
             positions = self.exchange.fetch_positions()
