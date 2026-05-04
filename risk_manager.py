@@ -14,12 +14,13 @@ class Order:
 
 
 class RiskManager:
+    # Fallback-значення якщо біржа недоступна або символ не знайдено
     CONTRACT_MULTIPLIERS = {
         "BTC/USDT:USDT": 0.01,
         "ETH/USDT:USDT": 0.1,
         "SOL/USDT:USDT": 1.0,
         "XRP/USDT:USDT": 100,
-        "DOGE/USDT:USDT": 1000,
+        "DOGE/USDT:USDT": 10.0,
         "LINK/USDT:USDT": 10,
     }
 
@@ -31,24 +32,44 @@ class RiskManager:
     }
     DEFAULT_PRICE_PRECISION = 3
 
-    def __init__(self, fixed_capital_usd: float):
+    def __init__(self, fixed_capital_usd: float, contract_size: float = None,
+                 symbol: str = None, price_precision: int = None):
+        """
+        fixed_capital_usd — капітал у USDT
+        contract_size     — реальний розмір контракту з біржі
+        symbol            — символ для fallback якщо contract_size не передано
+        price_precision   — кількість знаків після коми для ціни (з біржі)
+        """
         if fixed_capital_usd <= 0:
             raise ValueError(f"fixed_capital_usd має бути > 0, отримано: {fixed_capital_usd}")
         self.fixed_capital_usd = fixed_capital_usd
+        self._symbol = symbol
+
+        # Пріоритет contract_size: 1) передано явно → 2) fallback словник → 3) 1.0
+        if contract_size is not None and contract_size > 0:
+            self._contract_size = contract_size
+            logger.debug(f"✅ RiskManager: contract_size={contract_size} (з біржі)")
+        elif symbol and symbol in self.CONTRACT_MULTIPLIERS:
+            self._contract_size = self.CONTRACT_MULTIPLIERS[symbol]
+            logger.warning(f"⚠️ RiskManager: contract_size для {symbol} взято з fallback-словника ({self._contract_size}). Рекомендується оновити снайпера.")
+        else:
+            self._contract_size = 1.0
+            logger.warning(f"⚠️ RiskManager: contract_size невідомий для {symbol}, використовується 1.0. Розрахунки можуть бути некоректні!")
+
+        # Пріоритет precision: 1) передано явно → 2) дефолт 3
+        if price_precision is not None and price_precision >= 0:
+            self._price_precision = price_precision
+        else:
+            self._price_precision = self.DEFAULT_PRICE_PRECISION
+            logger.debug(f"RiskManager: price_precision не передано для {symbol}, використовується {self.DEFAULT_PRICE_PRECISION}")
 
     def _get_multiplier(self, symbol: str) -> float:
-        if symbol not in self.CONTRACT_MULTIPLIERS:
-            logger.warning(
-                f"⚠️ Символ '{symbol}' не знайдено в CONTRACT_MULTIPLIERS. "
-                f"Використовую множник 1.0 — перевірте правильність!"
-            )
-        return self.CONTRACT_MULTIPLIERS.get(symbol, 1.0)
+        """Повертає розмір контракту. Завжди бере з self._contract_size (встановленого при ініціалізації)."""
+        return self._contract_size
 
     def _get_price_precision(self, symbol: str) -> int:
-        for key, precision in self.PRICE_PRECISION.items():
-            if key in symbol:
-                return precision
-        return self.DEFAULT_PRICE_PRECISION
+        """Повертає точність ціни. Завжди бере з self._price_precision (встановленого при ініціалізації)."""
+        return self._price_precision
 
     def can_afford(self, client, required_margin_usd: float, buffer_pct: float = 0.05) -> bool:
         try:

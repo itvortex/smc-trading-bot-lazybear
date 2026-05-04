@@ -1,73 +1,266 @@
+"""
+SMC Smart Strategy — об'єднана стратегія (MTF + BOS/CHOCH + ML Logger).
+Входить одним ордером, шукає ліквідність, записує дані для Штучного Інтелекту.
+"""
+
 import logging
 import uuid
 from typing import Optional, Dict, Any
 
+import pandas as pd
+import numpy as np
 from telebot import types
 
-from .base_strategy import BaseStrategy
+from .base_strategy import BaseStrategy, ml_logger
 from risk_manager import RiskManager
-from indicators import find_smc_indicators
 from notifier import notifier, TRADE_DETAILS_CACHE
+
+# --- ІМПОРТ НАШОГО ML ЛОГЕРА ---
+from ml_logger import MLDataLogger
+
+# ml_logger береться з base_strategy (спільний екземпляр через base_strategy.ml_logger)
 
 logger = logging.getLogger(__name__)
 
+FRACTAL_BARS = 2
+
+
+# ══════════════════════════════════════════════════════
+#  ДОПОМІЖНІ ФУНКЦІЇ АНАЛІЗУ (Розумні мізки)
+# ══════════════════════════════════════════════════════
+
+def find_swing_points(df: pd.DataFrame, bars: int = FRACTAL_BARS):
+    highs = df['high'].values
+    lows = df['low'].values
+    n = len(df)
+
+    swing_highs = np.full(n, np.nan)
+    swing_lows = np.full(n, np.nan)
+
+    for i in range(bars, n - bars):
+        if all(highs[i] > highs[i - j] for j in range(1, bars + 1)) and \
+                all(highs[i] > highs[i + j] for j in range(1, bars + 1)):
+            swing_highs[i] = highs[i]
+
+        if all(lows[i] < lows[i - j] for j in range(1, bars + 1)) and \
+                all(lows[i] < lows[i + j] for j in range(1, bars + 1)):
+            swing_lows[i] = lows[i]
+
+    return pd.Series(swing_highs, index=df.index), pd.Series(swing_lows, index=df.index)
+
+
+def find_bos_choch(df: pd.DataFrame, swing_highs: pd.Series, swing_lows: pd.Series):
+    sh_indices = swing_highs.dropna().index.tolist()
+    sl_indices = swing_lows.dropna().index.tolist()
+
+    if len(sh_indices) < 2 or len(sl_indices) < 2:
+        return None
+
+    closes = df['close']
+
+    last_sh_idx = sh_indices[-1]
+    last_sh_val = swing_highs[last_sh_idx]
+    prev_sh_idx = sh_indices[-2]
+    prev_sh_val = swing_highs[prev_sh_idx]
+
+    last_sl_idx = sl_indices[-1]
+    last_sl_val = swing_lows[last_sl_idx]
+    prev_sl_idx = sl_indices[-2]
+    prev_sl_val = swing_lows[prev_sl_idx]
+
+    bullish_trend = last_sh_val > prev_sh_val and last_sl_val > prev_sl_val
+
+    result = None
+
+    recent_closes = closes.iloc[last_sh_idx:]
+    bos_candle = recent_closes[recent_closes > last_sh_val]
+    if not bos_candle.empty:
+        bos_idx = bos_candle.index[0]
+        bos_candle_i = df.index.get_loc(bos_idx)
+        result = {
+            'type': 'BOS' if bullish_trend else 'CHOCH',
+            'direction': 'BULLISH',
+            'level': last_sh_val,
+            'index': bos_candle_i,
+            'choch_low': float(df['low'].iloc[bos_candle_i]),
+            'choch_high': None,
+        }
+
+    recent_closes_b = closes.iloc[last_sl_idx:]
+    bos_candle_b = recent_closes_b[recent_closes_b < last_sl_val]
+    if not bos_candle_b.empty:
+        bos_idx_b = bos_candle_b.index[0]
+        bos_candle_i_b = df.index.get_loc(bos_idx_b)
+        bear_result = {
+            'type': 'BOS' if not bullish_trend else 'CHOCH',
+            'direction': 'BEARISH',
+            'level': last_sl_val,
+            'index': bos_candle_i_b,
+            'choch_low': None,
+            'choch_high': float(df['high'].iloc[bos_candle_i_b]),
+        }
+        if result is None or bos_candle_i_b > result['index']:
+            result = bear_result
+
+    return result
+
+
+def find_ob_by_bos(df: pd.DataFrame, bos: dict) -> Optional[dict]:
+    bos_i = bos['index']
+    direction = bos['direction']
+    lookback = min(bos_i, 30)
+
+    for i in range(bos_i - 1, bos_i - lookback, -1):
+        candle = df.iloc[i]
+        if direction == 'BULLISH' and candle['close'] < candle['open']:
+            return {'high': float(candle['high']), 'low': float(candle['low']), 'index': i, 'type': 'BULLISH'}
+        elif direction == 'BEARISH' and candle['close'] > candle['open']:
+            return {'high': float(candle['high']), 'low': float(candle['low']), 'index': i, 'type': 'BEARISH'}
+    return None
+
+
+def find_fvg_in_zone(df: pd.DataFrame, direction: str, zone_high: float, zone_low: float, lookback: int = 50) -> \
+Optional[dict]:
+    recent = df.tail(lookback)
+    for i in range(2, len(recent)):
+        c, c_2 = recent.iloc[i], recent.iloc[i - 2]
+        price = (c['high'] + c['low']) / 2
+
+        if direction == 'BULLISH':
+            if c['low'] > c_2['high'] and zone_low <= price <= zone_high * 1.02:
+                return {'high': float(c['low']), 'low': float(c_2['high'])}
+        elif direction == 'BEARISH':
+            if c['high'] < c_2['low'] and zone_low * 0.98 <= price <= zone_high:
+                return {'high': float(c_2['low']), 'low': float(c['high'])}
+    return None
+
+
+def find_liquidity_pool(swing_highs: pd.Series, swing_lows: pd.Series, direction: str, current_price: float) -> \
+Optional[float]:
+    if direction == 'BULLISH':
+        above = swing_highs.dropna()[swing_highs.dropna() > current_price]
+        return float(above.iloc[0]) if not above.empty else None
+    else:
+        below = swing_lows.dropna()[swing_lows.dropna() < current_price]
+        return float(below.iloc[-1]) if not below.empty else None
+
+
+# ══════════════════════════════════════════════════════
+#  ГОЛОВНИЙ КЛАС СТРАТЕГІЇ
+# ══════════════════════════════════════════════════════
 
 class SMCSingleStrategy(BaseStrategy):
+    LTF_MAP = {
+        '15m': '1m',
+        '1h': '5m',
+        '4h': '15m',
+        '1d': '1h',
+    }
 
     def __init__(self, client, risk_manager: RiskManager, symbol: str,
-                 timeframe: str = '1m', rr: float = 2.0,
-                 dry_run: bool = False):
+                 timeframe: str = '15m', rr: float = 2.0,
+                 leverage: int = 10, dry_run: bool = False):
         super().__init__(client, risk_manager, symbol, timeframe,
-                         leverage=10, rr=rr, dry_run=dry_run)
+                         leverage=leverage, rr=rr, dry_run=dry_run)
 
     # ──────────────────────────────────────────
     # Аналіз
     # ──────────────────────────────────────────
 
     def analyze(self) -> Optional[Dict[str, Any]]:
-        bias = self._get_htf_bias()
-        df = self.client.fetch_ohlcv(self.symbol, self.timeframe, limit=300)
-        if df.empty:
+        htf = self.TF_MAP.get(self.timeframe, '1h')
+        df_htf = self.client.fetch_ohlcv(self.symbol, htf, limit=300)
+        if df_htf.empty: return None
+
+        ema_200 = df_htf['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        curr_price = float(df_htf['close'].iloc[-1])
+        htf_bias = 'BULLISH' if curr_price > ema_200 else 'BEARISH'
+
+        sh_htf, sl_htf = find_swing_points(df_htf)
+        bos_htf = find_bos_choch(df_htf, sh_htf, sl_htf)
+
+        if bos_htf is None or (bos_htf['direction'] != htf_bias and bos_htf['type'] != 'CHOCH'):
             return None
 
-        df = find_smc_indicators(df)
-        recent = df.tail(15)
-        current = df.iloc[-1]
+        ob_htf = find_ob_by_bos(df_htf, bos_htf)
+        if ob_htf is None: return None
 
-        if bias == "LONG":
-            bull_obs = recent[recent['bullish_ob'] == True]
-            if not bull_obs.empty:
-                ob = bull_obs.iloc[-1]
-                if ob['low'] < current['close'] < (ob['high'] * 1.005) and recent['fvg_bullish'].any():
-                    logger.info("🔥 Знайдено Bullish Setup: OB + FVG!")
-                    return self._prepare_signal('LONG', ob)
+        ob_high, ob_low = ob_htf['high'], ob_htf['low']
+        tolerance = (ob_high - ob_low) * 0.5
 
-        if bias == "SHORT":
-            bear_obs = recent[recent['bearish_ob'] == True]
-            if not bear_obs.empty:
-                ob = bear_obs.iloc[-1]
-                if (ob['low'] * 0.995) < current['close'] < ob['high'] and recent['fvg_bearish'].any():
-                    logger.info("❄️ Знайдено Bearish Setup: OB + FVG!")
-                    return self._prepare_signal('SHORT', ob)
+        if not ((ob_low - tolerance) <= curr_price <= (ob_high + tolerance)):
+            return None
 
-        return None
+        ltf = self.LTF_MAP.get(htf, '5m')
+        df_ltf = self.client.fetch_ohlcv(self.symbol, ltf, limit=200)
+        if df_ltf.empty: return None
 
-    def _prepare_signal(self, action: str, ob) -> Dict[str, Any]:
+        sh_ltf, sl_ltf = find_swing_points(df_ltf, bars=2)
+        bos_ltf = find_bos_choch(df_ltf, sh_ltf, sl_ltf)
+
+        if bos_ltf is None or bos_ltf['type'] != 'CHOCH' or bos_ltf['direction'] != htf_bias:
+            return None
+
+        fvg = find_fvg_in_zone(df_ltf, htf_bias, ob_high, ob_low, lookback=50)
+        if fvg is None:
+            fvg = {'high': ob_high, 'low': ob_low}
+
+        # Формуємо сигнал
+        signal = self._prepare_signal(
+            action='LONG' if htf_bias == 'BULLISH' else 'SHORT',
+            fvg=fvg,
+            ob=ob_htf,
+            bos_ltf=bos_ltf,
+            sh=sh_htf,
+            sl=sl_htf,
+            curr_price=curr_price,
+        )
+
+        # 🤖 МАГІЯ ДЛЯ ML: Якщо сигнал валідний, записуємо стан свічки
+        if signal:
+            signal['indicators'] = df_ltf.iloc[-1].to_dict()
+
+        return signal
+
+    def _prepare_signal(self, action: str, fvg: dict, ob: dict,
+                        bos_ltf: dict, sh: pd.Series, sl: pd.Series,
+                        curr_price: float) -> Optional[Dict[str, Any]]:
+
         if action == 'LONG':
-            poi_start, poi_end = float(ob['high']), float(ob['low'])
-            sl = poi_end * 0.998
-            risk = poi_start - sl
-            tp = poi_start + (risk * self.rr)
-        else:
-            poi_start, poi_end = float(ob['low']), float(ob['high'])
-            sl = poi_end * 1.002
-            risk = sl - poi_start
-            tp = poi_start - (risk * self.rr)
+            entry = fvg['low']
+            sl_price = bos_ltf['choch_low'] * 0.999 if bos_ltf.get('choch_low') else ob['low'] * 0.998
+            liq_pool = find_liquidity_pool(sh, sl, 'BULLISH', curr_price)
+            tp_price = liq_pool if liq_pool and (liq_pool - entry) / max(entry - sl_price,
+                                                                         1e-10) >= self.rr else entry + (
+                        entry - sl_price) * self.rr
+            if tp_price <= entry or sl_price >= entry: return None
 
-        return {'action': action, 'poi_start': poi_start, 'poi_end': poi_end, 'sl': sl, 'tp': tp}
+        else:  # SHORT
+            entry = fvg['high']
+            sl_price = bos_ltf['choch_high'] * 1.001 if bos_ltf.get('choch_high') else ob['high'] * 1.002
+            liq_pool = find_liquidity_pool(sh, sl, 'BEARISH', curr_price)
+            tp_price = liq_pool if liq_pool and (entry - liq_pool) / max(sl_price - entry,
+                                                                         1e-10) >= self.rr else entry - (
+                        sl_price - entry) * self.rr
+            if tp_price >= entry or sl_price <= entry: return None
+
+        risk = abs(entry - sl_price)
+        reward = abs(tp_price - entry)
+        if (reward / risk if risk > 0 else 0) < 1.0: return None
+
+        return {
+            'action': action,
+            'entry': round(entry, self.precision),
+            'sl': round(sl_price, self.precision),
+            'tp': round(tp_price, self.precision),
+            'ob_high': ob['high'],
+            'ob_low': ob['low'],
+            'fvg_high': fvg['high'],
+            'fvg_low': fvg['low'],
+        }
 
     # ──────────────────────────────────────────
-    # Головний цикл
+    # Головний цикл (execute)
     # ──────────────────────────────────────────
 
     def execute(self) -> None:
@@ -79,145 +272,67 @@ class SMCSingleStrategy(BaseStrategy):
             logger.error(f"Execution API Error [{self.symbol}]: {e}")
             return
 
-        # 1. МОНІТОРИНГ ПОЗИЦІЇ
         if pos:
             if not self.is_active_position:
                 self.is_active_position = True
-
-                # ФІК #5: TP/SL вже прикріплені через attachAlgoOrds при виставленні лімітки.
-                # Перевіряємо algo-ордери — якщо їх немає (рідкісний fallback),
-                # виставляємо вручну. У нормальному сценарії вони вже активні.
                 algo_orders = []
                 try:
-                    algo_orders = self.client.exchange.fetch_open_orders(
-                        self.symbol, params={'stop': True}
-                    )
+                    algo_orders = self.client.exchange.fetch_open_orders(self.symbol, params={'stop': True})
                 except Exception:
                     pass
 
                 if not algo_orders:
-                    # Fallback — виставляємо TP/SL вручну ОДРАЗУ при відкритті позиції
-                    logger.warning(
-                        f"⚠️ TP/SL не знайдено після входу [{self.symbol}] — "
-                        f"виставляємо вручну негайно."
-                    )
-                    self._set_tp_sl_immediately(pos)
+                    self._update_sl_tp(pos)
                 else:
-                    notifier.send_message(
-                        f"🔔 <b>Ордер спрацював!</b>\n"
-                        f"Позиція {self.symbol} відкрита. TP/SL активні."
-                    )
+                    notifier.send_message(f"🔔 <b>Позицію відкрито [{self.symbol}]</b>\nTP/SL активні.")
             self._manage_breakeven(pos)
             return
 
-        # 2. ПОЗИЦІЯ ЗАКРИЛАСЯ
         if self.is_active_position and not pos:
             self.is_active_position = False
             self.is_be_set = False
-
             try:
                 for order in open_orders:
                     self.client.exchange.cancel_order(order['id'], self.symbol)
-            except Exception as e:
-                logger.error(f"Помилка скасування ордерів при закритті [{self.symbol}]: {e}")
-
+            except Exception:
+                pass
             self._cancel_all_algo_orders()
             self._handle_trade_closure()
             return
 
-        # 3. СЕТАП З ВІДКРИТИМИ ЛІМІТКАМИ — ПЕРЕВІРКА ІНВАЛІДАЦІЇ
         if not pos and len(open_orders) > 0:
-            if self._check_tp_invalidation(open_orders):
-                return
+            if self._check_tp_invalidation(open_orders): return
 
-        # 4. ПОШУК СЕТАПУ
         if not pos and len(open_orders) == 0:
             self.pending_trade = None
             self._execute_new_trade()
 
-    # ──────────────────────────────────────────
-    # ФІК #5: Виставлення TP/SL ОДРАЗУ після відкриття позиції
-    # ──────────────────────────────────────────
-
-    def _set_tp_sl_immediately(self, pos):
-        """
-        ФІК #5: Виставляє TP і SL негайно після виявлення відкритої позиції.
-        Викликається тільки якщо attachAlgoOrds не спрацював (fallback).
-        Після успішного виставлення — відправляє повідомлення в TG.
-        """
-        if not self.pending_trade or self.dry_run:
-            return
-
+    def _update_sl_tp(self, pos):
+        """Fallback: виставляє SL/TP вручну якщо attachAlgoOrds не спрацював."""
+        if not self.pending_trade or self.dry_run: return
         try:
             contracts = float(pos['contracts'])
             action = 'LONG' if str(pos['side']).upper() == 'LONG' else 'SHORT'
             close_side = 'sell' if action == 'LONG' else 'buy'
             pos_side = 'long' if action == 'LONG' else 'short'
 
-            tp_p = self.pending_trade['tp']
-            sl_p = self.pending_trade['sl']
-
-            # Take Profit — виставляємо першим (важливіший)
-            self.client.create_order(
-                self.symbol, 'market', close_side, contracts,
-                params={
-                    'triggerPrice': float(tp_p),
-                    'reduceOnly': True,
-                    'tdMode': 'isolated',
-                    'posSide': pos_side
-                }
-            )
-            # Stop Loss
-            self.client.create_order(
-                self.symbol, 'market', close_side, contracts,
-                params={
-                    'triggerPrice': float(sl_p),
-                    'reduceOnly': True,
-                    'tdMode': 'isolated',
-                    'posSide': pos_side
-                }
-            )
-
-            logger.info(
-                f"✅ TP/SL виставлено негайно [{self.symbol}]. "
-                f"TP: {tp_p}, SL: {sl_p}"
-            )
-            notifier.send_message(
-                f"🔔 <b>Ордер спрацював!</b>\n"
-                f"Позиція {self.symbol} відкрита.\n"
-                f"✅ TP: <code>{tp_p}</code>\n"
-                f"🛑 SL: <code>{sl_p}</code>\n"
-                f"⚠️ Захист виставлено через fallback (attachAlgoOrds не спрацював)."
-            )
-
+            self.client.create_order(self.symbol, 'market', close_side, contracts,
+                                     params={'triggerPrice': self.pending_trade['tp'], 'reduceOnly': True,
+                                             'tdMode': 'isolated', 'posSide': pos_side})
+            self.client.create_order(self.symbol, 'market', close_side, contracts,
+                                     params={'triggerPrice': self.pending_trade['sl'], 'reduceOnly': True,
+                                             'tdMode': 'isolated', 'posSide': pos_side})
+            notifier.send_message(f"🔔 <b>Позицію відкрито [{self.symbol}]</b>\nЗахист виставлено вручну (fallback).")
         except Exception as e:
-            logger.error(f"Помилка виставлення TP/SL після входу [{self.symbol}]: {e}")
-            notifier.send_message(
-                f"🚨 <b>УВАГА! [{self.symbol}]</b>\n"
-                f"Позиція відкрита але TP/SL НЕ ВИСТАВЛЕНІ!\n"
-                f"Причина: {e}\n"
-                f"Перевірте позицію вручну!"
-            )
-
-    # Стара назва методу залишена для зворотної сумісності
-    def _update_global_sl_tp(self, pos):
-        """Псевдонім для _set_tp_sl_immediately (зворотна сумісність)."""
-        self._set_tp_sl_immediately(pos)
+            logger.error(f"Помилка fallback SL/TP [{self.symbol}]: {e}")
 
     # ──────────────────────────────────────────
-    # Новий трейд
+    # Розміщення нового ордера
     # ──────────────────────────────────────────
 
     def _execute_new_trade(self) -> None:
         signal = self.analyze()
-        if not signal:
-            return
-
-        # ФІК #5: використовуємо безпечний метод отримання ціни з base_strategy
-        current_price = self._safe_get_current_price()
-        if current_price is None:
-            logger.error(f"[{self.symbol}] Не вдалося отримати поточну ціну для нового трейду")
-            return
+        if not signal: return
 
         is_long = signal['action'] == 'LONG'
         pos_side = 'long' if is_long else 'short'
@@ -226,91 +341,66 @@ class SMCSingleStrategy(BaseStrategy):
         if not self.dry_run:
             try:
                 self.client.set_leverage(self.leverage, self.symbol, margin_mode='isolated', pos_side=pos_side)
-            except Exception as e:
-                logger.error(f"Помилка встановлення плеча [{self.symbol}]: {e}")
+            except Exception:
+                pass
 
-        entry_grid = self.risk_manager.calculate_single_order(
-            self.symbol, current_price, signal['poi_start']
-        )
-
-        if not entry_grid:
-            logger.warning(f"⚠️ Сетап {signal['action']} [{self.symbol}] скасовано: недостатньо купівельної спроможності.")
-            return
+        entry_grid = self.risk_manager.calculate_single_order(self.symbol, signal['entry'], signal['entry'])
+        if not entry_grid: return
 
         order = entry_grid[0]
         amt = int(order.amount)
-        if amt <= 0:
-            return
+        if amt <= 0: return
 
-        sl_p = round(float(signal['sl']), self.precision)
-        tp_p = round(float(signal['tp']), self.precision)
+        tp_p, sl_p = signal['tp'], signal['sl']
 
         if not self.dry_run:
             try:
-                # ФІК #5: attachAlgoOrds — TP/SL прикріплені до лімітки.
-                # OKX активує їх автоматично в момент спрацювання лімітки,
-                # тому захист гарантований навіть якщо бот впаде.
                 self.client.create_order(
-                    self.symbol, 'limit', entry_side, amt, order.price,
-                    params={
-                        'tdMode': 'isolated',
-                        'posSide': pos_side,
-                        'attachAlgoOrds': [{
-                            'attachType': 'tp_sl',
-                            'tpTriggerPx': str(tp_p),
-                            'tpOrdPx':     '-1',
-                            'slTriggerPx': str(sl_p),
-                            'slOrdPx':     '-1',
-                        }]
-                    }
+                    self.symbol, 'limit', entry_side, amt, signal['entry'],
+                    params={'tdMode': 'isolated', 'posSide': pos_side, 'attachAlgoOrds': [
+                        {'attachType': 'tp_sl', 'tpTriggerPx': str(tp_p), 'tpOrdPx': '-1', 'slTriggerPx': str(sl_p),
+                         'slOrdPx': '-1'}]}
                 )
-                logger.info(
-                    f"✅ Ордер виставлено з attached TP={tp_p} SL={sl_p} [{self.symbol}]. "
-                    f"TP/SL активуються автоматично при спрацюванні лімітки."
-                )
-            except Exception as e:
-                logger.error(f"Помилка виставлення лімітки з TP/SL [{self.symbol}]: {e}")
-                # Fallback: гола лімітка — TP/SL виставимо через _set_tp_sl_immediately
-                # коли побачимо відкриту позицію в execute()
+            except Exception:
                 try:
-                    self.client.create_order(
-                        self.symbol, 'limit', entry_side, amt, order.price,
-                        params={'tdMode': 'isolated', 'posSide': pos_side}
-                    )
-                    logger.warning(
-                        f"⚠️ Fallback: лімітка без TP/SL [{self.symbol}]. "
-                        f"Захист виставиться ОДРАЗУ після відкриття позиції."
-                    )
-                except Exception as e2:
-                    logger.error(f"Fallback також не вдався [{self.symbol}]: {e2}")
+                    self.client.create_order(self.symbol, 'limit', entry_side, amt, signal['entry'],
+                                             params={'tdMode': 'isolated', 'posSide': pos_side})
+                except Exception:
                     return
 
         avg_entry = order.price
         margin = (amt * avg_entry * self.multiplier) / self.leverage
-
         self.is_be_set = False
-        self.pending_trade = {
-            'action': signal['action'], 'avg_entry': avg_entry,
-            'contracts': amt, 'margin': margin,
-            'tp': tp_p, 'sl': sl_p, 'limits_count': 1
-        }
+        self.pending_trade = {'action': signal['action'], 'avg_entry': signal['entry'], 'contracts': amt,
+                              'margin': margin, 'tp': tp_p, 'sl': sl_p}
 
+        # =========================================================
+        # 🤖 МАГІЯ МАШИННОГО НАВЧАННЯ (ЗБЕРІГАЄМО СТАН ПРИ ВХОДІ)
+        # =========================================================
+        ml_logger.save_entry_state(
+            order_id=self.symbol,
+            symbol=self.symbol,
+            side=signal['action'],
+            indicators=signal.get('indicators', {})
+        )
+        # =========================================================
+
+        rr_actual = round(abs(tp_p - signal['entry']) / abs(signal['entry'] - sl_p), 2)
         details_text = (
-            f"📝 <b>ДЕТАЛІ ПОЗИЦІЇ (Один вхід)</b>\n━━━━━━━━━━━━━━━\n"
+            f"📝 <b>ДЕТАЛІ ПОЗИЦІЇ (SMART SMC)</b>\n━━━━━━━━━━━━━━━\n"
             f"🧭 <b>Напрямок:</b> {'📈' if is_long else '📉'} <b>{signal['action']} {self.symbol}</b>\n"
-            f"🎯 <b>Вхід:</b> {avg_entry} | {amt} контр.\n"
-            f"✅ Take Profit: {tp_p}\n"
-            f"🛑 Stop Loss: {sl_p}\n"
-            f"━━━━━━━━━━━━━━━\n💰 Маржа: <b>~${margin:.2f}</b>\n⚖️ R:R = 1:{self.rr}"
+            f"🎯 <b>Вхід:</b> <code>{signal['entry']}</code> | {amt} контр.\n"
+            f"✅ <b>Take Profit:</b> <code>{tp_p}</code>\n"
+            f"🛑 <b>Stop Loss:</b> <code>{sl_p}</code>\n"
+            f"━━━━━━━━━━━━━━━\n💰 Маржа: <b>~${margin:.2f}</b> | R:R = 1:<b>{rr_actual}</b>"
         )
 
         trade_id = str(uuid.uuid4())[:8]
         TRADE_DETAILS_CACHE[trade_id] = details_text
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📊 Детальна інформація", callback_data=f"info|{trade_id}"))
+        markup = types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("📊 Деталі сетапу", callback_data=f"info|{trade_id}"))
 
         notifier.send_message(
-            f"{'📈' if is_long else '📉'} <b>[СЕТАП] {signal['action']} {self.symbol} ({self.timeframe})</b>\n"
-            f"Снайперський ордер виставлено! TP/SL прикріплені.",
-            reply_markup=markup
+            f"{'📈' if is_long else '📉'} <b>[SMART СЕТАП] {signal['action']} {self.symbol}</b>\n"
+            f"Ордер виставлено! TP/SL прикріплені.", reply_markup=markup
         )

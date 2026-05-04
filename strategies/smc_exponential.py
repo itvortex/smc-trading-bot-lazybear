@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any
 
 from telebot import types
 
-from .base_strategy import BaseStrategy, get_symbol_params
+from .base_strategy import BaseStrategy
 from risk_manager import RiskManager
 from indicators import find_smc_indicators
 from notifier import notifier, TRADE_DETAILS_CACHE

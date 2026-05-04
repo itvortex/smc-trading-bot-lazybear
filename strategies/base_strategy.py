@@ -4,35 +4,13 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional, Dict, Any
-
+from ml_logger import MLDataLogger
 from notifier import notifier
 
 logger = logging.getLogger(__name__)
+ml_logger = MLDataLogger()
 
 
-# ──────────────────────────────────────────────
-# Таблиця параметрів для кожної монети
-# (точність ціни, множник контракту)
-# Додайте нову монету тут — і вона буде скрізь
-# ──────────────────────────────────────────────
-SYMBOL_PARAMS = {
-    "BTC": {"precision": 1, "multiplier": 0.01},
-    "ETH": {"precision": 2, "multiplier": 0.1},
-    "XRP": {"precision": 4, "multiplier": 100.0},
-    "SOL": {"precision": 3, "multiplier": 1.0},
-    "BNB": {"precision": 2, "multiplier": 0.1},
-    "DOGE": {"precision": 5, "multiplier": 10.0},
-}
-DEFAULT_PARAMS = {"precision": 3, "multiplier": 1.0}
-
-
-def get_symbol_params(symbol: str) -> dict:
-    """Повертає precision та multiplier для символу. Шукає по ключу монети."""
-    for key, params in SYMBOL_PARAMS.items():
-        if key in symbol:
-            return params
-    logger.warning(f"⚠️ Невідомий символ '{symbol}' — використовую параметри за замовчуванням.")
-    return DEFAULT_PARAMS
 
 
 class BaseStrategy(ABC):
@@ -63,16 +41,15 @@ class BaseStrategy(ABC):
         self.is_active_position: bool = False
         self.is_be_set: bool = False
 
-        # Кешуємо параметри монети один раз при створенні стратегії
-        self._sym_params = get_symbol_params(symbol)
-
     @property
     def precision(self) -> int:
-        return self._sym_params["precision"]
+        """Точність ціни з біржі (збережена в risk_manager при створенні снайпера)."""
+        return self.risk_manager._price_precision
 
     @property
     def multiplier(self) -> float:
-        return self._sym_params["multiplier"]
+        """Реальний розмір контракту з біржі (збережений в risk_manager при створенні снайпера)."""
+        return self.risk_manager._contract_size
 
     # ──────────────────────────────────────────
     # Абстрактні методи — реалізуються в підкласах
@@ -320,20 +297,33 @@ class BaseStrategy(ABC):
 
     def _write_csv(self, action: str, entry: float, roe_pct: float, pnl_usd: float,
                    margin: float, status_csv: str):
-        """Записує результат угоди у trade_history.csv."""
+        """Записує результат угоди у trade_history.csv та відправляє дані для ML."""
         file_path = 'trade_history.csv'
         file_exists = os.path.isfile(file_path)
         try:
             with open(file_path, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
+
+                # ФІКС 1: Додали 'PosId' на перше місце в заголовок
                 if not file_exists:
                     writer.writerow(
-                        ['Date', 'Symbol', 'Action', 'Leverage', 'Margin_USD', 'ROE_Percent', 'PnL_USD', 'Status'])
+                        ['PosId', 'Date', 'Symbol', 'Action', 'Leverage', 'Margin_USD', 'ROE_Percent', 'PnL_USD',
+                         'Status'])
+
                 now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                # ФІКС 2: Додали порожні лапки "" на початок, щоб вирівняти колонки!
                 writer.writerow([
-                    now, self.symbol, action, f"{self.leverage}x",
+                    "", now, self.symbol, action, f"{self.leverage}x",
                     round(margin, 2), f"{round(roe_pct, 2)}%",
                     round(pnl_usd, 2), status_csv
                 ])
+
+            # ФІКС 3: Зберігаємо результат в ML-базу
+            # Якщо прибуток більший за 0 — це успіх (1), якщо ні — збиток (0)
+            is_win = pnl_usd > 0
+            # Використовуємо символ монети як ідентифікатор угоди
+            ml_logger.log_result(self.symbol, is_win)
+
         except Exception as e:
             logger.error(f"Помилка запису CSV [{self.symbol}]: {e}")

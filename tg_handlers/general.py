@@ -253,7 +253,7 @@ def cancel_cmd(message):
 
 @notifier.bot.callback_query_handler(func=lambda call: call.data.startswith('canx_'))
 def callback_cancel_sniper(call):
-    action = call.data.replace('canx_', '')
+    action = call.data[len("canx_"):]
     final_text = ""
     try:
         if action == 'all':
@@ -262,12 +262,11 @@ def callback_cancel_sniper(call):
         else:
             s_id = action
             if s_id in bot_state.active_strategies:
-                strategy = bot_state.active_strategies.pop(s_id)
                 try:
-                    bot_state.safe_cancel_all_orders(strategy.symbol)
-                    final_text = f"✅ <b>{strategy.symbol} зупинено.</b>\nВсі ордери видалено з біржі."
+                    bot_state.stop_sniper(s_id)  # зберігає стан і скасовує ордери
+                    final_text = f"✅ <b>Снайпер {s_id} зупинено.</b>\nВсі ордери видалено з біржі."
                 except Exception as e:
-                    final_text = f"⚠️ Снайпер {strategy.symbol} зупинений у боті, але виникла помилка на біржі."
+                    final_text = f"⚠️ Снайпер зупинений у боті, але виникла помилка на біржі: {e}"
             else:
                 notifier.bot.answer_callback_query(call.id, "❌ Вже виконано або снайпер неактивний.")
                 return
@@ -335,7 +334,8 @@ def download_file_callback(call):
     file_map = {
         'download_log': 'bot_activity.log',
         'download_csv': 'trade_history.csv',
-        'download_json': 'snipers.json'
+        'download_json': 'snipers.json',
+        'download_ml': 'ml_training_data.csv'
     }
 
     file_name = file_map.get(call.data)
@@ -349,8 +349,9 @@ def download_file_callback(call):
                 # Відкриваємо файл у режимі читання байтів ('rb') і відправляємо
                 with open(file_name, 'rb') as f:
                     notifier.bot.send_document(call.message.chat.id, f)
-                # Видаляємо повідомлення "Завантажую..."
                 notifier.bot.delete_message(call.message.chat.id, msg_wait.message_id)
+                try: notifier.bot.answer_callback_query(call.id)
+                except: pass
             except Exception as e:
                 logger.error(f"Помилка відправки файлу {file_name}: {e}")
                 notifier.bot.edit_message_text(f"❌ Помилка відправки: {e}", call.message.chat.id, msg_wait.message_id)

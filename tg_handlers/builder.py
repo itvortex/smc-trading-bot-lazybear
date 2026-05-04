@@ -7,7 +7,6 @@ import bot_state
 from risk_manager import RiskManager
 from strategies.smc_exponential import SMCExponentialStrategy
 from strategies.smc_single import SMCSingleStrategy
-from strategies.smc_bos_strategy import SMCBOSStrategy
 
 logger = logging.getLogger("Bot-Core")
 
@@ -51,7 +50,7 @@ def show_main_snipers_menu(chat_id, message_id=None):
 
 @notifier.bot.callback_query_handler(func=lambda call: call.data.startswith('run_sniper_'))
 def callback_run_sniper(call):
-    sniper_id = call.data.split('_')[2]
+    sniper_id = call.data[len("run_sniper_"):]
     cfg = bot_state.snipers_data["list"][sniper_id]
 
     if sniper_id in bot_state.active_strategies:
@@ -61,19 +60,31 @@ def callback_run_sniper(call):
         notifier.bot.answer_callback_query(call.id, f"🛑 {cfg['symbol']} зупинено!")
     else:
         total_purchasing_power = cfg["position"] * cfg["leverage"]
-        risk_mgr = RiskManager(fixed_capital_usd=total_purchasing_power)
+        contract_size = cfg.get("contract_size")  # реальне значення збережене при створенні снайпера
+
+        # Якщо снайпер старий і не має contract_size — отримуємо з біржі і зберігаємо
+        if contract_size is None:
+            logger.info(f"[Runner] contract_size відсутній для {cfg['symbol']}, запитую з біржі...")
+            info = bot_state.client.fetch_symbol_info(cfg["symbol"])
+            contract_size = info['contract_size']
+            bot_state.snipers_data["list"][sniper_id]["contract_size"] = contract_size
+            bot_state.snipers_data["list"][sniper_id]["precision"] = info['precision']
+            bot_state.save_snipers(bot_state.snipers_data)
+            logger.info(f"[Runner] Збережено contract_size={contract_size}, precision={info['precision']} для {cfg['symbol']}")
+
+        risk_mgr = RiskManager(
+            fixed_capital_usd=total_purchasing_power,
+            contract_size=contract_size,
+            symbol=cfg["symbol"],
+            price_precision=cfg.get("precision"),
+        )
         bot_state.risk_managers[sniper_id] = risk_mgr
 
         strat_type = cfg.get('strat_type', 'exponential')
         if strat_type == 'single':
-            new_strategy = SMCSingleStrategy(client=bot_state.client, risk_manager=risk_mgr, symbol=cfg["symbol"], timeframe=cfg.get("timeframe", "1m"), rr=cfg.get("rr", 2.0), dry_run=bot_state.DRY_RUN)
-        elif strat_type == 'bos':
-            new_strategy = SMCBOSStrategy(client=bot_state.client, risk_manager=risk_mgr, symbol=cfg["symbol"], timeframe=cfg.get("timeframe", "15m"), rr=cfg.get("rr", 2.0), leverage=cfg["leverage"], dry_run=bot_state.DRY_RUN)
-        else:
-            new_strategy = SMCExponentialStrategy(client=bot_state.client, risk_manager=risk_mgr, symbol=cfg["symbol"], timeframe=cfg.get("timeframe", "1m"), dry_run=bot_state.DRY_RUN)
-            new_strategy.rr = cfg.get("rr", 2.0)
-
-        new_strategy.leverage = cfg["leverage"]
+            new_strategy = SMCSingleStrategy(client=bot_state.client, risk_manager=risk_mgr, symbol=cfg["symbol"], timeframe=cfg.get("timeframe", "1m"), rr=cfg.get("rr", 2.0), leverage=cfg["leverage"], dry_run=bot_state.DRY_RUN)
+        else:  # exponential (bos недоступний поки не реалізовано)
+            new_strategy = SMCExponentialStrategy(client=bot_state.client, risk_manager=risk_mgr, symbol=cfg["symbol"], timeframe=cfg.get("timeframe", "1m"), leverage=cfg["leverage"], rr=cfg.get("rr", 2.0), dry_run=bot_state.DRY_RUN)
         bot_state.active_strategies[sniper_id] = new_strategy
         notifier.bot.answer_callback_query(call.id, f"▶️ {cfg['symbol']} запущено!")
 
@@ -101,7 +112,7 @@ def menu_edit_sniper(call):
 
 @notifier.bot.callback_query_handler(func=lambda call: call.data.startswith('edit_sn_'))
 def callback_edit_sniper(call):
-    sniper_id = call.data.split('_')[2]
+    sniper_id = call.data[len("edit_sn_"):]
     cfg = bot_state.snipers_data["list"][sniper_id]
     chat_id = call.message.chat.id
     bot_state.user_builder[chat_id] = {'msg_id': call.message.message_id, 'mode': 'edit', 'sniper_id': sniper_id, 'symbol': cfg['symbol'], 'position': cfg['position'], 'leverage': cfg['leverage'], 'rr': cfg.get('rr', 2.0), 'timeframe': cfg.get('timeframe', '1m'), 'strat_type': cfg.get('strat_type', 'exponential')}
@@ -127,7 +138,9 @@ def update_builder_menu(chat_id):
     if data.get('symbol'):
         try:
             df = bot_state.client.fetch_ohlcv(data['symbol'], '1m', limit=1)
-            text += f"📊 <b>Актив:</b> <code>{data['symbol']}</code> (~${float(df.iloc[-1]['close']):.2f})\n"
+            cs = data.get('contract_size')
+            cs_text = f" | 📦 контракт: <b>{cs}</b>" if cs else " | 📦 <i>контракт: не визначено</i>"
+            text += f"📊 <b>Актив:</b> <code>{data['symbol']}</code> (~${float(df.iloc[-1]['close']):.2f}){cs_text}\n"
         except: pass
     text += "\nЗаповніть всі параметри для збереження."
     try: notifier.bot.edit_message_text(chat_id=chat_id, message_id=data['msg_id'], text=text, parse_mode="HTML", reply_markup=markup)
@@ -138,7 +151,6 @@ def bld_strat(call):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton("📶 Експоненціальна сітка", callback_data="set_strat_exponential"))
     markup.add(types.InlineKeyboardButton("🎯 Снайперський вхід", callback_data="set_strat_single"))
-    markup.add(types.InlineKeyboardButton("🧠 BOS/CHOCH (повний SMC)", callback_data="set_strat_bos"))
     markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="bld_strat_back"))
     notifier.bot.edit_message_text("⚙️ <b>Оберіть тип стратегії:</b>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=markup)
 
@@ -153,7 +165,7 @@ def bld_strat_back(call): update_builder_menu(call.message.chat.id)
 @notifier.bot.callback_query_handler(func=lambda call: call.data == 'bld_sym')
 def bld_sym(call):
     msg = notifier.bot.send_message(call.message.chat.id, "Введіть тикер (наприклад: <code>ETH/USDT:USDT</code>):", parse_mode="HTML")
-    notifier.bot.register_next_step_handler(msg, lambda m: process_bld_input(m, msg.message_id, 'symbol', lambda x: x.strip().upper()))
+    notifier.bot.register_next_step_handler(msg, lambda m: process_bld_symbol(m, msg.message_id))
 
 @notifier.bot.callback_query_handler(func=lambda call: call.data == 'bld_pos')
 def bld_pos(call):
@@ -169,6 +181,52 @@ def bld_lev(call):
 def bld_rr(call):
     msg = notifier.bot.send_message(call.message.chat.id, "Введіть значення Risk/Reward (наприклад: <code>2</code>):", parse_mode="HTML")
     notifier.bot.register_next_step_handler(msg, lambda m: process_bld_input(m, msg.message_id, 'rr', float))
+
+def process_bld_symbol(message, prompt_id):
+    """Обробляє введення символу: перевіряє його на біржі та зберігає реальний contract_size."""
+    chat_id = message.chat.id
+    symbol = message.text.strip().upper()
+
+    # Видаляємо повідомлення одразу
+    try:
+        notifier.bot.delete_message(chat_id, message.message_id)
+        notifier.bot.delete_message(chat_id, prompt_id)
+    except:
+        pass
+
+    if chat_id not in bot_state.user_builder:
+        return
+
+    # Показуємо індикатор завантаження
+    wait_msg = notifier.bot.send_message(chat_id, f"🔍 Перевіряю <code>{symbol}</code> на біржі...", parse_mode="HTML")
+
+    try:
+        # Запитуємо реальні параметри символу з біржі (contract_size + precision)
+        info = bot_state.client.fetch_symbol_info(symbol)
+        contract_size = info['contract_size']
+        precision = info['precision']
+
+        bot_state.user_builder[chat_id]['symbol'] = symbol
+        bot_state.user_builder[chat_id]['contract_size'] = contract_size
+        bot_state.user_builder[chat_id]['precision'] = precision
+
+        try:
+            notifier.bot.delete_message(chat_id, wait_msg.message_id)
+        except:
+            pass
+
+        logger.info(f"[Builder] Символ {symbol} підтверджено, contract_size={contract_size}, precision={precision}")
+
+    except Exception as e:
+        try:
+            notifier.bot.delete_message(chat_id, wait_msg.message_id)
+        except:
+            pass
+        notifier.bot.send_message(chat_id, f"❌ Не вдалося знайти <code>{symbol}</code> на біржі.\nПеревірте правильність тикеру і спробуйте знову.", parse_mode="HTML")
+        logger.error(f"[Builder] Помилка перевірки символу {symbol}: {e}")
+
+    update_builder_menu(chat_id)
+
 
 def process_bld_input(message, prompt_id, key, cast_func):
     chat_id = message.chat.id
@@ -209,7 +267,17 @@ def bld_save(call):
     data = bot_state.user_builder.get(chat_id)
     if not data: return
 
-    s_data = {"name": f"{data['symbol'].split('/')[0]} Sniper", "symbol": data['symbol'], "position": data['position'], "leverage": data['leverage'], "rr": data['rr'], "timeframe": data.get('timeframe', '1m'), "strat_type": data.get('strat_type', 'exponential')}
+    s_data = {
+        "name": f"{data['symbol'].split('/')[0]} Sniper",
+        "symbol": data['symbol'],
+        "position": data['position'],
+        "leverage": data['leverage'],
+        "rr": data['rr'],
+        "timeframe": data.get('timeframe', '1m'),
+        "strat_type": data.get('strat_type', 'exponential'),
+        "contract_size": data.get('contract_size'),
+        "precision": data.get('precision'),
+    }
 
     if data['mode'] == 'create':
         bot_state.snipers_data["list"][str(int(time.time()))] = s_data
@@ -238,7 +306,7 @@ def delete_sniper_list(call):
 
 @notifier.bot.callback_query_handler(func=lambda call: call.data.startswith('del_sniper_'))
 def callback_del_sniper(call):
-    sniper_id = call.data.split('_')[2]
+    sniper_id = call.data[len("del_sniper_"):]
     if sniper_id in bot_state.active_strategies:
         notifier.bot.answer_callback_query(call.id, "❌ Зупиніть снайпера перед видаленням!", show_alert=True)
         return

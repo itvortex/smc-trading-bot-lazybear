@@ -20,7 +20,7 @@ class TelegramNotifier:
             raise ValueError(
                 "❌ ПОМИЛКА: TELEGRAM_TOKEN не знайдено! Переконайтеся, що файл .env існує і містить токен.")
 
-        self.bot = telebot.TeleBot(token, threaded=False)
+        self.bot = telebot.TeleBot(token, threaded=True)
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self._verify_connection()
 

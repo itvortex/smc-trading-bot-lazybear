@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 from okx_client import OKXClient
 
 logger = logging.getLogger("Bot-Core")
@@ -14,6 +15,10 @@ client = OKXClient()
 active_strategies = {}
 risk_managers = {}
 user_builder = {}
+strategies_lock = threading.Lock()
+
+# Флаг синхронізації з біржею (analytics/history)
+is_synced = False
 
 SNIPERS_FILE = 'snipers.json'
 
@@ -97,14 +102,16 @@ def safe_cancel_all_orders(symbol: str):
 
 def start_sniper(s_id: str, strategy_obj):
     """Реєструє стратегію як активну та зберігає стан."""
-    active_strategies[s_id] = strategy_obj
+    with strategies_lock:
+        active_strategies[s_id] = strategy_obj
     save_active_state()
     logger.info(f"🟢 Снайпер [{s_id}] запущено: {strategy_obj.symbol}")
 
 
 def stop_sniper(s_id: str):
     """Зупиняє один снайпер, скасовує його ордери та зберігає стан."""
-    strategy = active_strategies.pop(s_id, None)
+    with strategies_lock:
+        strategy = active_strategies.pop(s_id, None)
     if strategy:
         try:
             safe_cancel_all_orders(strategy.symbol)
@@ -119,12 +126,15 @@ def stop_sniper(s_id: str):
 def stop_all_snipers():
     """Зупиняє всі активні снайпери та очищує стан."""
     global active_strategies
-    for s_id, strategy in list(active_strategies.items()):
+    with strategies_lock:
+        snapshot = list(active_strategies.items())
+        active_strategies.clear()
+
+    for s_id, strategy in snapshot:
         try:
             safe_cancel_all_orders(strategy.symbol)
         except Exception as e:
             logger.error(f"Помилка зупинки [{s_id}]: {e}")
 
-    active_strategies.clear()
     save_active_state()  # Зберігаємо порожній список
     logger.info("🛑 Всі снайпери зупинені.")
