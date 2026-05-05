@@ -172,9 +172,9 @@ class SMCSingleStrategy(BaseStrategy):
         df_htf = self.client.fetch_ohlcv(self.symbol, htf, limit=300)
         if df_htf.empty: return None
 
-        ema_200 = df_htf['close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        curr_price = float(df_htf['close'].iloc[-1])
-        htf_bias = 'BULLISH' if curr_price > ema_200 else 'BEARISH'
+        # Передаємо timeframe щоб індикатори мали правильні ключі
+        from indicators import find_smc_indicators
+        df_htf = find_smc_indicators(df_htf, timeframe=htf)
 
         sh_htf, sl_htf = find_swing_points(df_htf)
         bos_htf = find_bos_choch(df_htf, sh_htf, sl_htf)
@@ -205,6 +205,8 @@ class SMCSingleStrategy(BaseStrategy):
         if fvg is None:
             fvg = {'high': ob_high, 'low': ob_low}
 
+        df_ltf = find_smc_indicators(df_ltf, timeframe=ltf)
+
         # Формуємо сигнал
         signal = self._prepare_signal(
             action='LONG' if htf_bias == 'BULLISH' else 'SHORT',
@@ -218,7 +220,24 @@ class SMCSingleStrategy(BaseStrategy):
 
         # 🤖 МАГІЯ ДЛЯ ML: Якщо сигнал валідний, записуємо стан свічки
         if signal:
-            signal['indicators'] = df_ltf.iloc[-1].to_dict()
+            last = df_ltf.iloc[-1]
+            last_htf = df_htf.iloc[-1]
+
+            # Dist to EMA
+            dist_to_ema = 0.0
+            if not pd.isna(last_htf.get('ema_200', float('nan'))) and last_htf['ema_200'] > 0:
+                dist_to_ema = round(
+                    abs(last_htf['close'] - last_htf['ema_200']) / last_htf['ema_200'] * 100, 4
+                )
+
+            signal['indicators'] = {
+                **last.to_dict(),  # всі ltf колонки включно з rsi_5m, atr_5m, adx_5m
+                **{f'rsi_{htf}': last_htf.get(f'rsi_{htf}', 0),
+                   f'adx_{htf}': last_htf.get(f'adx_{htf}', 0)},
+                'dist_to_ema_pct': dist_to_ema,
+            }
+
+        return signal
 
         return signal
 
