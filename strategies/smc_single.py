@@ -168,6 +168,16 @@ class SMCSingleStrategy(BaseStrategy):
     # ──────────────────────────────────────────
 
     def analyze(self) -> Optional[Dict[str, Any]]:
+        # 1. Отримуємо HTF Bias та поточну ціну
+        htf_bias = self._get_htf_bias()
+        curr_price = self._safe_get_current_price()
+
+        if curr_price is None or htf_bias == "NEUTRAL":
+            return None
+
+        # Конвертуємо LONG/SHORT у BULLISH/BEARISH для пошуку BOS
+        expected_direction = 'BULLISH' if htf_bias == 'LONG' else 'BEARISH'
+
         htf = self.TF_MAP.get(self.timeframe, '1h')
         df_htf = self.client.fetch_ohlcv(self.symbol, htf, limit=300)
         if df_htf.empty: return None
@@ -179,7 +189,7 @@ class SMCSingleStrategy(BaseStrategy):
         sh_htf, sl_htf = find_swing_points(df_htf)
         bos_htf = find_bos_choch(df_htf, sh_htf, sl_htf)
 
-        if bos_htf is None or (bos_htf['direction'] != htf_bias and bos_htf['type'] != 'CHOCH'):
+        if bos_htf is None or (bos_htf['direction'] != expected_direction and bos_htf['type'] != 'CHOCH'):
             return None
 
         ob_htf = find_ob_by_bos(df_htf, bos_htf)
@@ -198,10 +208,10 @@ class SMCSingleStrategy(BaseStrategy):
         sh_ltf, sl_ltf = find_swing_points(df_ltf, bars=2)
         bos_ltf = find_bos_choch(df_ltf, sh_ltf, sl_ltf)
 
-        if bos_ltf is None or bos_ltf['type'] != 'CHOCH' or bos_ltf['direction'] != htf_bias:
+        if bos_ltf is None or bos_ltf['type'] != 'CHOCH' or bos_ltf['direction'] != expected_direction:
             return None
 
-        fvg = find_fvg_in_zone(df_ltf, htf_bias, ob_high, ob_low, lookback=50)
+        fvg = find_fvg_in_zone(df_ltf, expected_direction, ob_high, ob_low, lookback=50)
         if fvg is None:
             fvg = {'high': ob_high, 'low': ob_low}
 
@@ -209,7 +219,7 @@ class SMCSingleStrategy(BaseStrategy):
 
         # Формуємо сигнал
         signal = self._prepare_signal(
-            action='LONG' if htf_bias == 'BULLISH' else 'SHORT',
+            action=htf_bias,  # Передаємо напрямок LONG або SHORT
             fvg=fvg,
             ob=ob_htf,
             bos_ltf=bos_ltf,
@@ -236,8 +246,6 @@ class SMCSingleStrategy(BaseStrategy):
                    f'adx_{htf}': last_htf.get(f'adx_{htf}', 0)},
                 'dist_to_ema_pct': dist_to_ema,
             }
-
-        return signal
 
         return signal
 
